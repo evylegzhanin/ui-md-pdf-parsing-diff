@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF vs Markdown — compare</title>
+    <link rel="stylesheet" href="/static/compare.css">
+</head>
+<body>
+    <div class="toolbar">
+        <label>
+            PDF folder (absolute path)
+            <input type="text" id="pdfDir" placeholder="/path/to/pdfs" autocomplete="off">
+        </label>
+        <label>
+            Markdown folder (absolute path)
+            <input type="text" id="mdDir" placeholder="/path/to/markdown" autocomplete="off">
+        </label>
+        <button type="button" id="btnLoad">Load pairs</button>
+        <div class="doc-select">
+            <span style="font-size:0.75rem;color:var(--muted, #94a3b8)">Document</span>
+            <select id="docSelect" disabled>
+                <option value="">—</option>
+            </select>
+        </div>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="panes">
+        <div class="pane">
+            <header>PDF (pages)</header>
+            <div class="pane-scroll pdf-pages" id="pdfScroll"></div>
+        </div>
+        <div class="pane">
+            <header class="pane-header-md">
+                <span>Markdown</span>
+                <div class="md-view-toggle" role="tablist" aria-label="Markdown view">
+                    <button type="button" role="tab" id="mdTabPreview" class="md-view-tab is-active" data-md-view="preview" aria-selected="true">Preview</button>
+                    <button type="button" role="tab" id="mdTabRaw" class="md-view-tab" data-md-view="raw" aria-selected="false">Raw</button>
+                </div>
+            </header>
+            <div class="pane-scroll" id="mdScroll">
+                <div class="md-content md-view-panel" id="mdPreview"></div>
+                <pre class="md-raw md-view-panel is-hidden" id="mdRaw" aria-hidden="true"></pre>
+            </div>
+        </div>
+    </div>
+    <script>
+(function () {
+    const LS_PDF = "compare_ui_pdf_dir";
+    const LS_MD = "compare_ui_md_dir";
+    const LS_MD_VIEW = "compare_ui_md_view";
+
+    const pdfDirEl = document.getElementById("pdfDir");
+    const mdDirEl = document.getElementById("mdDir");
+    const btnLoad = document.getElementById("btnLoad");
+    const docSelect = document.getElementById("docSelect");
+    const statusEl = document.getElementById("status");
+    const pdfScroll = document.getElementById("pdfScroll");
+    const mdScroll = document.getElementById("mdScroll");
+    const mdPreview = document.getElementById("mdPreview");
+    const mdRaw = document.getElementById("mdRaw");
+    const mdTabPreview = document.getElementById("mdTabPreview");
+    const mdTabRaw = document.getElementById("mdTabRaw");
+
+    const prePdf = {{ pdf_dir_json | safe }};
+    const preMd = {{ md_dir_json | safe }};
+    pdfDirEl.value = prePdf || localStorage.getItem(LS_PDF) || "";
+    mdDirEl.value = preMd || localStorage.getItem(LS_MD) || "";
+
+    function getMdViewPref() {
+        const v = localStorage.getItem(LS_MD_VIEW);
+        return v === "raw" ? "raw" : "preview";
+    }
+
+    function setMdView(mode) {
+        const raw = mode === "raw";
+        localStorage.setItem(LS_MD_VIEW, raw ? "raw" : "preview");
+        mdPreview.classList.toggle("is-hidden", raw);
+        mdRaw.classList.toggle("is-hidden", !raw);
+        mdPreview.setAttribute("aria-hidden", raw ? "true" : "false");
+        mdRaw.setAttribute("aria-hidden", raw ? "false" : "true");
+        mdTabPreview.classList.toggle("is-active", !raw);
+        mdTabRaw.classList.toggle("is-active", raw);
+        mdTabPreview.setAttribute("aria-selected", raw ? "false" : "true");
+        mdTabRaw.setAttribute("aria-selected", raw ? "true" : "false");
+    }
+
+    setMdView(getMdViewPref());
+    mdTabPreview.addEventListener("click", function () { setMdView("preview"); });
+    mdTabRaw.addEventListener("click", function () { setMdView("raw"); });
+
+    function setStatus(msg, isError) {
+        statusEl.textContent = msg || "";
+        statusEl.classList.toggle("error", !!isError);
+    }
+
+    function q(dir) {
+        return encodeURIComponent(dir);
+    }
+
+    let syncing = false;
+
+    function scrollRatio(el) {
+        const max = el.scrollHeight - el.clientHeight;
+        if (max <= 0) return 0;
+        return el.scrollTop / max;
+    }
+
+    function applyRatio(el, ratio) {
+        const max = el.scrollHeight - el.clientHeight;
+        el.scrollTop = max > 0 ? ratio * max : 0;
+    }
+
+    function wireScrollSync() {
+        pdfScroll.addEventListener("scroll", function onPdfScroll() {
+            if (syncing) return;
+            syncing = true;
+            const r = scrollRatio(pdfScroll);
+            applyRatio(mdScroll, r);
+            requestAnimationFrame(function () { syncing = false; });
+        });
+
+        mdScroll.addEventListener("scroll", function onMdScroll() {
+            if (syncing) return;
+            syncing = true;
+            const r = scrollRatio(mdScroll);
+            applyRatio(pdfScroll, r);
+            requestAnimationFrame(function () { syncing = false; });
+        });
+    }
+
+    async function loadPairs() {
+        const pdfDir = pdfDirEl.value.trim();
+        const mdDir = mdDirEl.value.trim();
+        if (!pdfDir || !mdDir) {
+            setStatus("Enter both folder paths.", true);
+            return;
+        }
+        localStorage.setItem(LS_PDF, pdfDir);
+        localStorage.setItem(LS_MD, mdDir);
+        setStatus("Loading…");
+        btnLoad.disabled = true;
+        try {
+            const url = "/api/pairs?pdf_dir=" + q(pdfDir) + "&md_dir=" + q(mdDir);
+            const res = await fetch(url);
+            const data = await res.json().catch(function () { return {}; });
+            if (!res.ok) {
+                setStatus(data.detail || res.statusText || "Request failed", true);
+                docSelect.innerHTML = "<option value=\"\">—</option>";
+                docSelect.disabled = true;
+                return;
+            }
+            const stems = data.stems || [];
+            docSelect.innerHTML = stems.length
+                ? stems.map(function (s) {
+                    return "<option value=\"" + s.replace(/"/g, "&quot;") + "\">" + s + "</option>";
+                }).join("")
+                : "<option value=\"\">(no matching pairs)</option>";
+            docSelect.disabled = stems.length === 0;
+            setStatus(stems.length + " document(s) with both .pdf and .md.");
+            // Replacing <option> elements does not fire "change", so load the first stem explicitly.
+            if (stems.length > 0) {
+                await loadDocument(docSelect.value);
+            }
+        } catch (e) {
+            setStatus(String(e.message || e), true);
+        } finally {
+            btnLoad.disabled = false;
+        }
+    }
+
+    async function loadDocument(stem) {
+        const pdfDir = pdfDirEl.value.trim();
+        const mdDir = mdDirEl.value.trim();
+        if (!stem || !pdfDir || !mdDir) {
+            pdfScroll.innerHTML = "";
+            mdPreview.innerHTML = "";
+            mdRaw.textContent = "";
+            return;
+        }
+        setStatus("Loading " + stem + "…");
+        pdfScroll.innerHTML = "";
+        mdPreview.innerHTML = "";
+        mdRaw.textContent = "";
+
+        try {
+            const infoUrl = "/api/pdf-info/" + encodeURIComponent(stem) + "?pdf_dir=" + q(pdfDir);
+            const infoRes = await fetch(infoUrl);
+            const info = await infoRes.json().catch(function () { return {}; });
+            if (!infoRes.ok) {
+                throw new Error(info.detail || "PDF info failed");
+            }
+            const n = info.page_count || 0;
+            for (let i = 0; i < n; i++) {
+                const wrap = document.createElement("div");
+                wrap.className = "page-wrap";
+                wrap.setAttribute("data-page-index", String(i));
+                const img = document.createElement("img");
+                img.alt = "Page " + (i + 1);
+                img.loading = i < 2 ? "eager" : "lazy";
+                img.src = "/api/pdf-page/" + encodeURIComponent(stem) + "/" + i + "?pdf_dir=" + q(pdfDir);
+                wrap.appendChild(img);
+                pdfScroll.appendChild(wrap);
+            }
+
+            const mdUrl = "/api/render/" + encodeURIComponent(stem) + "?md_dir=" + q(mdDir);
+            const mdRes = await fetch(mdUrl);
+            const mdData = await mdRes.json().catch(function () { return {}; });
+            if (!mdRes.ok) {
+                throw new Error(mdData.detail || "Render failed");
+            }
+            mdPreview.innerHTML = mdData.html || "";
+            mdRaw.textContent = typeof mdData.raw === "string" ? mdData.raw : "";
+            setMdView(getMdViewPref());
+            pdfScroll.scrollTop = 0;
+            mdScroll.scrollTop = 0;
+            setStatus("Showing " + stem + " (" + n + " pages). Scroll is synced between panes.");
+        } catch (e) {
+            setStatus(String(e.message || e), true);
+        }
+    }
+
+    btnLoad.addEventListener("click", loadPairs);
+    docSelect.addEventListener("change", function () {
+        loadDocument(docSelect.value);
+    });
+
+    wireScrollSync();
+})();
+    </script>
+</body>
+</html>
