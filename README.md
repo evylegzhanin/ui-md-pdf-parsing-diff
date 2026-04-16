@@ -1,4 +1,4 @@
-# ui-compare-md-pdf-parsing
+# ui-md-pdf-parsing-diff
 
 Side-by-side comparison UI for PDF documents and their parsed Markdown counterparts.
 
